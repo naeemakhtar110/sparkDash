@@ -179,6 +179,11 @@ export async function readServerGenerationTokens(baseUrl, opts = {}) {
         /^splash_decode_output_tokens_total(?:\{[^}]*\})?\s+([\d.eE+-]+)\s*$/gm
       );
       if (splash != null) return splash;
+      // infernix (wallawalla47/infernix) — committed output tokens, counted from server start.
+      const infernix = fromSeries(
+        /^infernix_generation_tokens_total(?:\{[^}]*\})?\s+([\d.eE+-]+)\s*$/gm
+      );
+      if (infernix != null) return infernix;
     }
   } catch {
     /* try next */

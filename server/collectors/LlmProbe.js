@@ -39,7 +39,7 @@ const TENSORFOLD_CACHED_PROMPT_COUNTERS = [
   "prefix_cache_hits_total",
 ];
 /** owned_by values that are exactly an engine's own name (each is also its backend type). */
-const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance", "ninfer"]);
+const OWNED_BY_ENGINES = new Set(["locals", "splash", "tensorfold", "ds4", "sglang", "exl3", "q27", "freetoken", "radiance", "ninfer", "infernix"]);
 /** Current SGLang names first. Deprecated aliases still work but log a warning per hit. */
 const SGLANG_SERVER_INFO_PATHS = ["/server_info", "/get_server_info"];
 const SGLANG_MODEL_INFO_PATHS = ["/model_info", "/get_model_info"];
@@ -126,7 +126,7 @@ export class LlmProbe {
     this._openTunnel = openSshLlmTunnel;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'ninfer' | 'freetoken' | 'radiance' | 'strata' | 'flare' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'lmstudio' | 'ollama' | 'ds4' | 'exl3' | 'q27' | 'tensorfold' | 'ninfer' | 'infernix' | 'freetoken' | 'radiance' | 'strata' | 'flare' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -273,6 +273,8 @@ export class LlmProbe {
     this._localsBase = null;
     /** Splash: the last scrape's decode and prefill counters; null until one is read. */
     this._splashBase = null;
+    /** infernix: the last scrape's decode counter, prefill counter and prefill seconds; null until one is read. */
+    this._infernixBase = null;
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
@@ -535,6 +537,7 @@ export class LlmProbe {
     this._seedNext = false;
     this._localsBase = null;
     this._splashBase = null;
+    this._infernixBase = null;
     this.slotState.clear();
     this._mlxServeLive = null;
     this.lastTokenCounts = { input: 0, output: 0 };
@@ -636,6 +639,7 @@ export class LlmProbe {
       this.backendType !== "q27" &&
       this.backendType !== "locals" &&
       this.backendType !== "splash" &&
+      this.backendType !== "infernix" &&
       this.backendType !== "tensorfold" &&
       this.backendType !== "freetoken" &&
       this.backendType !== "radiance" &&
@@ -734,6 +738,8 @@ export class LlmProbe {
       if (/splash/i.test(ownedBy)) return "splash";
       // TensorFold (ashhart/TensorFold) reports owned_by: "tensorfold" on both MLX and CUDA servers.
       if (/tensorfold/i.test(ownedBy)) return "tensorfold";
+      // infernix (wallawalla47/infernix) reports owned_by: "infernix" and serves infernix_* Prometheus series on /metrics.
+      if (/infernix/i.test(ownedBy)) return "infernix";
       // ninfer reports owned_by: "ninfer" and serves ninfer_* Prometheus series on /metrics.
       if (/ninfer/i.test(ownedBy)) return "ninfer";
       // FreeToken reports owned_by: "FreeToken".
@@ -943,6 +949,13 @@ export class LlmProbe {
   /** @param {string} body */
   static _metricsLookLikeSplash(body) {
     return /(?:^|\n)splash_(?:decode_output_tokens_total|requests_submitted_total)(?:\{|\s)/m.test(
+      String(body || "")
+    );
+  }
+
+  /** @param {string} body */
+  static _metricsLookLikeInfernix(body) {
+    return /(?:^|\n)infernix_(?:generation_tokens_total|engine_ready|model_info)(?:\{|\s)/m.test(
       String(body || "")
     );
   }
@@ -1194,6 +1207,7 @@ export class LlmProbe {
       this.backendType === "ds4" ||
       this.backendType === "q27" ||
       this.backendType === "splash" ||
+      this.backendType === "infernix" ||
       this.backendType === "sglang";
     if (wantsPrometheus) {
       try {
@@ -1218,6 +1232,12 @@ export class LlmProbe {
           ) {
             this.backendType = "splash";
             this._applySplashMetrics(txt, dtSec);
+          } else if (
+            this.backendType === "infernix" ||
+            LlmProbe._metricsLookLikeInfernix(txt)
+          ) {
+            this.backendType = "infernix";
+            this._applyInfernixMetrics(txt, dtSec);
           } else {
             // Only claim vLLM when the backend is still unclassified — a
             // positively-identified backend (LM Studio, tensorfold, …) must not
@@ -1239,6 +1259,12 @@ export class LlmProbe {
           }
         } else if (this.backendType === "splash") {
           this._markUnmeasured(`metrics endpoint answered ${metricsRes.status}`);
+        } else if (this.backendType === "infernix") {
+          // /metrics follows the server's API-key authentication: say so when it wants a key.
+          const auth = this._noteAuthStatus(metricsRes.status);
+          this._markUnmeasured(
+            auth === "auth" ? `metrics endpoint needs an API key (${metricsRes.status})` : `metrics endpoint answered ${metricsRes.status}`
+          );
         } else if (
           (this.backendType == null || this.backendType === "vllm") &&
           this.backendType !== "ds4" &&
@@ -1248,7 +1274,7 @@ export class LlmProbe {
           this.backendType = "vllm";
         }
       } catch {
-        if (this.backendType === "splash") {
+        if (this.backendType === "splash" || this.backendType === "infernix") {
           this._markUnmeasured("metrics request failed");
         } else if (
           (this.backendType == null || this.backendType === "vllm") &&
@@ -1723,6 +1749,124 @@ export class LlmProbe {
     const accept = this._getPromMetric(txt, "splash_draft_acceptance_ratio");
     this.mtpAcceptanceRate = accept == null ? null : Math.round(accept * 10000) / 10000;
     if (this._getPromMetric(txt, "splash_ready") === 1) this.gpuMemoryUtilization = 1;
+  }
+
+  /**
+   * Apply infernix (wallawalla47/infernix) Prometheus /metrics.
+   *
+   * Every figure is read from the engine's own `infernix_*` series. Decode tok/s is the delta of
+   * `infernix_generation_tokens_total` over the poll, so an idle engine reads 0. Prefill counts the tokens
+   * the engine computed (`infernix_prefill_tokens_total`; prefix-cache hits are the separate
+   * `infernix_prompt_tokens_cached_total`). A prefill is a short burst, so its rate is taken over the
+   * engine's own prefill execution time (`infernix_execution_seconds_total{kind="prefill"}`) when the build
+   * exports it, and held while requests are in flight; without it the rate is spread over the poll.
+   * Running, waiting (plus paused-for-recovery) requests, the lane count, KV pages, preemptions,
+   * draft acceptance and the TTFT / request-duration histograms come from their own series. infernix
+   * publishes no inter-token latency, so that stays unset.
+   *
+   * A scrape that cannot be measured is said to be so (`measurementValid: false`) instead of reading as
+   * zero: no earlier sample within 10 s, counters that went backwards (engine restart), no token counters,
+   * or `infernix_engine_ready 0`.
+   * @param {string} txt
+   * @param {number} dtSec
+   */
+  _applyInfernixMetrics(txt, dtSec) {
+    // A counter or gauge is a finite, non-negative number; a series that is absent or malformed is not 0.
+    const num = (name) => {
+      const v = this._getPromMetric(txt, name);
+      return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+    };
+    const generated = num("infernix_generation_tokens_total");
+    if (generated == null) {
+      this._markUnmeasured("metrics had no infernix token counters");
+      return;
+    }
+    if (this._getPromMetric(txt, "infernix_engine_ready") === 0) {
+      this._infernixBase = null;
+      this._markUnmeasured("engine reports it is not ready");
+      return;
+    }
+    const computed = num("infernix_prefill_tokens_total");
+    const prefillSeconds = this._getPromMetricLabeled(txt, "infernix_execution_seconds_total", "kind", "prefill");
+    const before = this._infernixBase;
+    let why = null;
+    if (this._seedNext) why = "re-seeding counters after an interruption";
+    else if (!before) why = "no earlier sample to measure against";
+    else if (!(dtSec > 0 && dtSec < 10)) why = "no earlier sample within 10 s to measure against";
+    else if (generated < before.out || (computed != null && before.in != null && computed < before.in)) why = "engine counters restarted";
+    this._seedNext = false;
+    this._infernixBase = { out: generated, in: computed, sec: prefillSeconds };
+
+    const running = num("infernix_requests_running");
+    const waiting = num("infernix_requests_waiting");
+    const paused = num("infernix_requests_paused");
+
+    if (why) {
+      // No rate on this poll, and it says so; the next one measures against these counters.
+      this._markUnmeasured(why, { reseed: false });
+    } else {
+      this.measurementValid = true;
+      this.measurementError = null;
+      this.generationTps = Math.round(((generated - before.out) / dtSec) * 100) / 100;
+      if (computed != null && before.in != null) {
+        const deltaTokens = computed - before.in;
+        const deltaSeconds = prefillSeconds != null && before.sec != null ? prefillSeconds - before.sec : 0;
+        // Tokens over the time the engine spent prefilling; the poll interval only when it publishes no prefill time.
+        const rate = deltaTokens / (deltaSeconds > 0 ? deltaSeconds : dtSec);
+        this._setPrefillTps(rate, (running ?? 0) + (waiting ?? 0) > 0);
+      }
+    }
+    this.totalOutputTokens = generated;
+
+    this.requestsRunning = running;
+    // A request paused under resource pressure waits for recovery, as a preempted vLLM request goes back to its queue.
+    this.requestsWaiting = waiting == null && paused == null ? null : (waiting ?? 0) + (paused ?? 0);
+
+    const cached = num("infernix_prompt_tokens_cached_total");
+    const prompt = num("infernix_prompt_tokens_total");
+    // The token ledger wants the full prompt: computed plus cache-served (`prompt` counts both, once, at binding).
+    if (prompt != null) this.totalPromptTokens = prompt;
+    else if (computed != null) this.totalPromptTokens = cached != null ? computed + cached : computed;
+    if (cached != null) this.totalCachedTokens = prompt != null ? Math.min(cached, prompt) : cached;
+    this._setPrefillSplitRates(cached, computed, dtSec);
+    if (this.uncachedPrefillTps != null) this.uncachedPrefillTps = this.prefillTps;
+
+    // Lanes: the engine's maximum concurrency is its slot count; a running request occupies one.
+    const lanes = num("infernix_max_concurrency");
+    this.slotsActive = running == null ? 0 : Math.round(running);
+    this.slotsTotal = lanes == null ? 0 : Math.round(lanes);
+    this.preemptionsTotal = num("infernix_preemptions_total");
+
+    // KV pool in pages. Pages held only by cached prefix blocks no request uses are reclaimed on demand,
+    // so they do not count as fill (a prefix-cache tree block is one KV page).
+    const usedPages = num("infernix_device_kv_used_pages");
+    const capacityPages = num("infernix_device_kv_capacity_pages");
+    this._clearKvPool();
+    if (usedPages != null && capacityPages != null && capacityPages > 0) {
+      const reclaimable = Math.min(usedPages, num("infernix_prefix_cache_evictable_blocks") ?? 0);
+      this.kvCacheUsage = Math.round(Math.min(1, (usedPages - reclaimable) / capacityPages) * 10000) / 10000;
+    } else {
+      this.kvCacheUsage = null;
+    }
+
+    const drafted = num("infernix_spec_decode_draft_tokens_total");
+    const accepted = num("infernix_spec_decode_accepted_tokens_total");
+    this.mtpAcceptanceRate =
+      drafted != null && accepted != null && drafted > 0
+        ? Math.round(Math.min(1, accepted / drafted) * 10000) / 10000
+        : null;
+
+    const quantile = (metric) => {
+      const hist = this._parseHistogram(txt, metric, `${metric}_count`);
+      const q = this._histogramQuantile(hist.buckets, hist.total, 0.95);
+      return q == null ? null : Math.round(q * 1000) / 1000;
+    };
+    this.ttftP95Seconds = quantile("infernix_time_to_first_token_seconds");
+    this.e2eP95Seconds = quantile("infernix_request_duration_seconds");
+    this.itlP95Seconds = null; // infernix publishes no inter-token latency
+
+    // Weights stay resident while the server answers; "ready" is the engine accepting work.
+    if (this._getPromMetric(txt, "infernix_engine_ready") === 1) this.gpuMemoryUtilization = 1;
   }
 
   /**

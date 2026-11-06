@@ -22,6 +22,7 @@ function engineFetch(ownedBy, requested) {
 for (const [ownedBy, backend] of [
   ["locals", "locals"],
   ["splash", "splash"],
+  ["infernix", "infernix"],
   ["tensorfold", "tensorfold"],
 ]) {
   test(`owned_by ${ownedBy} is classified as ${backend} without probing LM Studio or Ollama paths`, async () => {

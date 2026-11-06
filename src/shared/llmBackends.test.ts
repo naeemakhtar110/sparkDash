@@ -9,4 +9,8 @@ describe("backendLabel", () => {
   it("names the Splash engine instead of echoing its id", () => {
     expect(backendLabel("splash")).toBe("Splash");
   });
+
+  it("names the infernix engine instead of echoing its id", () => {
+    expect(backendLabel("infernix")).toBe("Infernix");
+  });
 });

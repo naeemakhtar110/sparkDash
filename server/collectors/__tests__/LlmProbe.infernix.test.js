@@ -155,6 +155,28 @@ test("_applyInfernixMetrics: decode is the generated-token delta; idle reads 0",
   assert.equal(probe.generationTps, 0);
 });
 
+test("_applyInfernixMetrics: a long prompt's tokens land at the end; they are measured over all its prefill time, not the last poll's", () => {
+  // A 63,208-token prompt ran 5.36 s of prefill over four polls, and the engine added its tokens only on the last one.
+  // Over the last poll's 1.34 s alone that would read ~47,000 tok/s; the truth is ~11,800.
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8000);
+  probe._applyInfernixMetrics(INFERNIX_METRICS, 1_700_000_000);
+  for (const sec of [2.94, 4.26, 5.59]) {
+    probe._applyInfernixMetrics(advance(INFERNIX_METRICS, { [PREFILL]: sec }), 1);
+    assert.equal(probe.prefillActive, true);
+    assert.equal(probe.prefillTps, 0);
+  }
+  probe._applyInfernixMetrics(
+    advance(INFERNIX_METRICS, { [PREFILL]: 6.925, infernix_prefill_tokens_total: 5100 + 63208, infernix_prompt_tokens_total: 5100 + 63208 }),
+    1,
+  );
+  assert.ok(probe.prefillTps > 11_000 && probe.prefillTps < 12_500);
+  probe._applyInfernixMetrics(
+    advance(INFERNIX_METRICS, { [PREFILL]: 7.925, infernix_prefill_tokens_total: 5100 + 63208 + 9000, infernix_prompt_tokens_total: 5100 + 63208 + 9000 }),
+    1,
+  );
+  assert.equal(probe.prefillTps, 9000);
+});
+
 test("_applyInfernixMetrics: decoding and prefilling are marked live; one stream's rate is the aggregate over running requests", () => {
   const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8000);
   probe._applyInfernixMetrics(advance(INFERNIX_METRICS, { infernix_requests_running: 2 }), 1_700_000_000);

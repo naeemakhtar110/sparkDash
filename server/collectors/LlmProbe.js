@@ -1795,7 +1795,12 @@ export class LlmProbe {
     else if (!(dtSec > 0 && dtSec < 10)) why = "no earlier sample within 10 s to measure against";
     else if (generated < before.out || (computed != null && before.in != null && computed < before.in)) why = "engine counters restarted";
     this._seedNext = false;
-    this._infernixBase = { out: generated, in: computed, sec: prefillSeconds };
+    // infernix adds a prompt's computed tokens once its prefill finishes, while the prefill seconds grow chunk by chunk
+    // as it runs, so one long prompt's time spans several polls. The tokens that land are measured over all the
+    // prefill time since tokens last landed, not over the last poll's share of it.
+    const inMoved = !why && computed != null && before.in != null && computed > before.in;
+    const prefillFrom = !why && before.prefillFrom != null ? before.prefillFrom : prefillSeconds;
+    this._infernixBase = { out: generated, in: computed, sec: prefillSeconds, prefillFrom: inMoved ? prefillSeconds : prefillFrom };
 
     const running = num("infernix_requests_running");
     const waiting = num("infernix_requests_waiting");
@@ -1809,10 +1814,9 @@ export class LlmProbe {
       this.measurementError = null;
       this.generationTps = Math.round(((generated - before.out) / dtSec) * 100) / 100;
       if (computed != null && before.in != null) {
-        const deltaTokens = computed - before.in;
-        const deltaSeconds = prefillSeconds != null && before.sec != null ? prefillSeconds - before.sec : 0;
-        // Tokens over the time the engine spent prefilling; the poll interval only when it publishes no prefill time.
-        const rate = deltaTokens / (deltaSeconds > 0 ? deltaSeconds : dtSec);
+        const deltaSeconds = inMoved && prefillSeconds != null && prefillFrom != null ? prefillSeconds - prefillFrom : 0;
+        // Tokens over the time the engine spent prefilling them; the poll interval only when it publishes no prefill time.
+        const rate = inMoved ? (computed - before.in) / (deltaSeconds > 0 ? deltaSeconds : dtSec) : 0;
         this._setPrefillTps(rate, (running ?? 0) + (waiting ?? 0) > 0);
       }
     }
@@ -1828,9 +1832,10 @@ export class LlmProbe {
     // per-stream rate is held while requests are open, and cleared once none are.
     const open = (running ?? 0) > 0;
     const outMoved = !why && generated > before.out;
-    const inMoved = !why && computed != null && before.in != null && computed > before.in;
+    // Prefilling: prompt tokens landed, or the engine spent prefill time since the last poll.
+    const prefillRan = !why && prefillSeconds != null && before.sec != null && prefillSeconds > before.sec;
     this.decodeActive = open && outMoved;
-    this.prefillActive = open && inMoved;
+    this.prefillActive = open && (inMoved || prefillRan);
     if (!open) this.perStreamTps = null;
     else if (outMoved) this.perStreamTps = Math.round((this.generationTps / running) * 100) / 100;
 

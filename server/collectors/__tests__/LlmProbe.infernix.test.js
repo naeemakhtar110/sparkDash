@@ -155,6 +155,36 @@ test("_applyInfernixMetrics: decode is the generated-token delta; idle reads 0",
   assert.equal(probe.generationTps, 0);
 });
 
+test("_applyInfernixMetrics: decoding and prefilling are marked live; one stream's rate is the aggregate over running requests", () => {
+  const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8000);
+  probe._applyInfernixMetrics(advance(INFERNIX_METRICS, { infernix_requests_running: 2 }), 1_700_000_000);
+  assert.equal(probe.decodeActive, false); // the seeding poll measures nothing
+
+  probe._applyInfernixMetrics(advance(INFERNIX_METRICS, { infernix_requests_running: 2, infernix_generation_tokens_total: 285 }), 2);
+  assert.equal(probe.generationTps, 100);
+  assert.equal(probe.decodeActive, true);
+  assert.equal(probe.prefillActive, false);
+  assert.equal(probe.perStreamTps, 50); // 100 tok/s over 2 running requests
+
+  // a poll where only prompt tokens were computed: prefilling, and the last per-stream rate is held
+  probe._applyInfernixMetrics(
+    advance(INFERNIX_METRICS, { infernix_requests_running: 2, infernix_generation_tokens_total: 285, infernix_prefill_tokens_total: 9100 }),
+    2,
+  );
+  assert.equal(probe.decodeActive, false);
+  assert.equal(probe.prefillActive, true);
+  assert.equal(probe.perStreamTps, 50);
+
+  // nothing open: idle, no per-stream rate
+  probe._applyInfernixMetrics(
+    advance(INFERNIX_METRICS, { infernix_requests_running: 0, infernix_generation_tokens_total: 285, infernix_prefill_tokens_total: 9100 }),
+    2,
+  );
+  assert.equal(probe.decodeActive, false);
+  assert.equal(probe.prefillActive, false);
+  assert.equal(probe.perStreamTps, null);
+});
+
 test("_applyInfernixMetrics: prefill is computed tokens over the engine's prefill time, held while requests are in flight", () => {
   const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 8000);
   probe._applyInfernixMetrics(INFERNIX_METRICS, 1_700_000_000);

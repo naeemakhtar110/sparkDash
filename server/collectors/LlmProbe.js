@@ -1822,6 +1822,18 @@ export class LlmProbe {
     // A request paused under resource pressure waits for recovery, as a preempted vLLM request goes back to its queue.
     this.requestsWaiting = waiting == null && paused == null ? null : (waiting ?? 0) + (paused ?? 0);
 
+    // Live activity and one stream's decode rate. infernix publishes no per-token latency histogram, so a stream's rate
+    // is the aggregate over the requests running, as for other engines without one. A request is decoding when output
+    // tokens moved since the last poll and prefilling when prompt tokens were computed; between moves the last
+    // per-stream rate is held while requests are open, and cleared once none are.
+    const open = (running ?? 0) > 0;
+    const outMoved = !why && generated > before.out;
+    const inMoved = !why && computed != null && before.in != null && computed > before.in;
+    this.decodeActive = open && outMoved;
+    this.prefillActive = open && inMoved;
+    if (!open) this.perStreamTps = null;
+    else if (outMoved) this.perStreamTps = Math.round((this.generationTps / running) * 100) / 100;
+
     const cached = num("infernix_prompt_tokens_cached_total");
     const prompt = num("infernix_prompt_tokens_total");
     // The token ledger wants the full prompt: computed plus cache-served (`prompt` counts both, once, at binding).
